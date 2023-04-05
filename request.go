@@ -3,6 +3,7 @@ package please
 import (
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -31,6 +32,8 @@ individual methods, as you lose out on the builtin concurrency and
 buffer pools.
 */
 func NewRequest(endpoint string) *Request {
+	errnie.Debugs("NewRequest() <-", endpoint)
+
 	readTimeout, _ := time.ParseDuration("30s")
 	writeTimeout, _ := time.ParseDuration("30s")
 	maxIdleConnDuration, _ := time.ParseDuration("1h")
@@ -50,6 +53,8 @@ func NewRequest(endpoint string) *Request {
 		},
 		endpoint: endpoint,
 		headers:  make(map[string]string),
+		handle:   fasthttp.AcquireRequest(),
+		response: fasthttp.AcquireResponse(),
 	}
 }
 
@@ -63,6 +68,10 @@ func (request *Request) AddHeaders(headers map[string]string) *Request {
 	return request
 }
 
+func (request *Request) GetHeader(key string) string {
+	return string(request.response.Header.Peek(key))
+}
+
 /*
 AddClientCert configures a client certificate for accessing services that
 require this type of authorization.
@@ -73,14 +82,19 @@ func (request *Request) AddClientCert(certs *tls.Config) *Request {
 	return request
 }
 
-func (request *Request) Get(msg Msg) []byte {
+func (request *Request) Get(path string, data map[string]interface{}) []byte {
 	errnie.Trace()
-	return request.do("GET", msg)
+	return request.do("GET", path, data)
 }
 
-func (request *Request) Post(msg Msg) []byte {
+func (request *Request) Post(path string, data map[string]interface{}) []byte {
 	errnie.Trace()
-	return request.do("POST", msg)
+	return request.do("POST", path, data)
+}
+
+func (request *Request) Put(path string, data map[string]interface{}) []byte {
+	errnie.Trace()
+	return request.do("PUT", path, data)
 }
 
 /*
@@ -88,7 +102,11 @@ do implements the Job interface, which enables the HTTP request to
 be scheduled onto a worker pool.
 TODO: Only handles POST for now, but that is all we use anyway.
 */
-func (request *Request) do(method string, msg Msg) []byte {
+func (request *Request) do(
+	method string, path string, data map[string]interface{},
+) []byte {
+	errnie.Trace()
+
 	hc := &fasthttp.HostClient{
 		Addr:  request.getAddr(),
 		IsTLS: true,
@@ -98,16 +116,33 @@ func (request *Request) do(method string, msg Msg) []byte {
 
 	request.response.Reset()
 	request.handle.Header.SetMethod(method)
-	request.handle.URI().Update(request.endpoint)
+	request.handle.URI().Update(request.endpoint + path)
 
-	buf, err := json.Marshal(&msg)
+	for key, value := range request.headers {
+		request.handle.Header.Add(key, value)
+	}
+
+	buf, err := json.Marshal(&data)
 	errnie.Handles(err)
-	request.handle.SetBody(buf)
+
+	if method == "POST" {
+		request.handle.SetBody(buf)
+	}
+
+	if method == "GET" {
+		url := request.endpoint + path + "?"
+
+		for key, value := range data {
+			url += fmt.Sprintf("&%s=%v", key, value)
+		}
+
+		request.handle.URI().Update(url)
+	}
 
 	errnie.Handles(hc.Do(request.handle, request.response))
 	return request.response.Body()
 }
 
 func (request *Request) getAddr() string {
-	return strings.Split(request.endpoint, "/")[1] + ":443"
+	return strings.Split(request.endpoint, "/")[2] + ":443"
 }
